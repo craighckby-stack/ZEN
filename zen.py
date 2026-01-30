@@ -7,9 +7,10 @@ Core functionality for cross-repository code enhancement.
 import os
 import sys
 import logging
-from typing import List, Dict, Optional, Any, Final
+from typing import List, Dict, Optional, Any, Final, Tuple
 
 # Assuming core modules provide necessary implementations
+# We assume these imports are fast and necessary
 from core.evolution import EvolutionEngine
 from core.knowledge_base import KnowledgeBase
 from core.git_operations import GitManager 
@@ -24,15 +25,17 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Define required environment variables as a module constant
-REQUIRED_ENV_VARS: Final[List[str]] = ['GITHUB_TOKEN', 'GEMINI_API_KEY']
+REQUIRED_ENV_VARS: Final[Tuple[str, str]] = ('GITHUB_TOKEN', 'GEMINI_API_KEY')
 
 def setup_logging(level=logging.INFO):
     """Initializes standard logging configuration."""
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        stream=sys.stdout
-    )
+    # Check if logging is already configured to prevent duplicate handlers
+    if not logging.root.handlers:
+        logging.basicConfig(
+            level=level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            stream=sys.stdout
+        )
 
 class ZenConfigError(Exception):
     """Custom exception for configuration related errors."""
@@ -54,23 +57,24 @@ class Zen:
         safety_checks: bool = True
     ):
         """
-        Initialize Zen system.
+        Initialize Zen system, performing immediate validation.
         """
         if not target_repo_url:
             raise ZenConfigError("Target repository URL cannot be empty.")
 
-        self.target_repo_url: str = target_repo_url
-        self.source_repo_urls: List[str] = source_repo_urls
-        # Ensure files_to_update is treated consistently as a List[str]
-        self.files_to_update: List[str] = files_to_update if files_to_update is not None else []
-        self.branch_name: str = branch_name
-        self.max_iterations: int = max_iterations
-        self.safety_checks: bool = safety_checks
+        self.target_repo_url: Final[str] = target_repo_url
+        self.source_repo_urls: Final[List[str]] = source_repo_urls
+        # Use tuple conversion for immutability and minor performance gain in lookups if list is large
+        self.files_to_update: Final[Tuple[str, ...]] = tuple(files_to_update) if files_to_update is not None else tuple()
+        self.branch_name: Final[str] = branch_name
+        self.max_iterations: Final[int] = max_iterations
+        self.safety_checks: Final[bool] = safety_checks
         
         # --- Dependency Initialization ---
-        self.git_manager = GitManager()
-        self.knowledge_base = KnowledgeBase()
-        self.evolution_engine = EvolutionEngine(
+        # Dependencies initialized immediately as they are required for all operations
+        self.git_manager: Final[GitManager] = GitManager()
+        self.knowledge_base: Final[KnowledgeBase] = KnowledgeBase()
+        self.evolution_engine: Final[EvolutionEngine] = EvolutionEngine(
             max_iterations=max_iterations,
             safety_checks=safety_checks
         )
@@ -80,6 +84,8 @@ class Zen:
     
     def _validate_environment(self) -> None:
         """Validate required environment variables are set."""
+        
+        # Use a generator expression for efficient checking
         missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
         
         if missing:
@@ -92,13 +98,14 @@ class Zen:
         if not local_paths:
             return
 
-        logger.info(f"Initiating cleanup for {len(local_paths)} temporary local repositories.")
+        # Use DEBUG level for cleanup attempt announcements to reduce log noise
+        logger.debug(f"Attempting cleanup for {len(local_paths)} temporary local repositories.")
         try:
             self.git_manager.cleanup_local_paths(local_paths)
             logger.debug("Cleanup successful.")
         except Exception as e:
-            # Log the failure but don't re-raise, cleanup failure should not crash final result reporting
-            logger.warning(f"Failed to clean up temporary paths: {e}", exc_info=False)
+            # Log cleanup failure as a warning, but do not interrupt the flow
+            logger.warning(f"Failed to clean up temporary paths: {e}")
     
     def run(self) -> Dict[str, Any]:
         """
@@ -112,56 +119,56 @@ class Zen:
         logger.info("Starting Zen improvement cycle...")
         
         all_local_paths: List[str] = []
-        target_path: Optional[str] = None
-        repo_urls_to_clone: List[str] = []
         
-        # Define base failure structure for consistency
-        failure_result = {'success': False, 'repositories_analyzed': 0, 'improvements_applied': 0}
+        # 1. Pre-calculation and Configuration
+        # Ensure target is always the last element for reliable slicing
+        repo_urls_to_clone: Final[List[str]] = self.source_repo_urls + [self.target_repo_url]
+        total_repos: Final[int] = len(repo_urls_to_clone)
+        
+        # Initialize result dictionary structure early
+        result: Dict[str, Any] = {
+            'success': False, 
+            'repositories_analyzed': total_repos, 
+            'improvements_applied': 0,
+            'files_targeted': len(self.files_to_update) or 'All',
+            'target_path': None
+        }
 
         try:
-            # 1. Clone Repositories
-            # We enforce the target repository is cloned LAST for predictable indexing.
-            repo_urls_to_clone = self.source_repo_urls + [self.target_repo_url]
-            
+            # 2. Clone Repositories (Heavy I/O)
             cloned_paths = self.git_manager.clone_repositories(repo_urls_to_clone)
-            all_local_paths = cloned_paths # Store full list for cleanup
+            all_local_paths = cloned_paths 
             
-            if len(cloned_paths) != len(repo_urls_to_clone):
+            if len(cloned_paths) != total_repos:
                 raise RuntimeError("GitManager failed to clone all specified repositories.")
 
-            # Separate paths based on known order (target is the last one)
-            target_path = cloned_paths[-1]
-            source_paths = cloned_paths[:-1]
-            
-            total_repos = len(repo_urls_to_clone)
+            # Separate paths based on known order
+            target_path: Final[str] = cloned_paths[-1]
+            source_paths: Final[List[str]] = cloned_paths[:-1]
+            result['target_path'] = target_path # Record path early for reporting
+
             logger.info(f"Target repository cloned locally: {target_path}")
-            logger.info(f"Found {len(source_paths)} source repositories for knowledge base.")
             
-            # 2. Build Knowledge Base (from sources only)
+            # 3. Build Knowledge Base (from sources only)
             if source_paths:
                 self.knowledge_base.build(source_paths)
-            else:
-                logger.warning("No source knowledge provided for synthesis.")
+                logger.debug(f"Knowledge base built from {len(source_paths)} repositories.")
             
-            # 3. Generate Improvements (targeting the local target path)
+            # 4. Generate Improvements (CPU/LLM heavy)
             improvements = self.evolution_engine.generate_improvements(
                 knowledge_base=self.knowledge_base,
                 target_local_path=target_path,
-                files_to_target=self.files_to_update
+                files_to_target=list(self.files_to_update) # Convert tuple back to list if required by engine
             )
             
             if not improvements:
                 logger.info("No improvements generated. Cycle finished successfully.")
-                return {
-                    'repositories_analyzed': total_repos,
-                    'files_targeted': len(self.files_to_update) or 'All',
-                    'improvements_generated': 0,
-                    'improvements_applied': 0,
-                    'success': True
-                }
+                result['success'] = True
+                result['improvements_generated'] = 0
+                return result
 
-            # 4. Apply Improvements to Target (using local path)
-            commit_msg = f"Zen Improvement: Applied {len(improvements)} generated changes."
+            # 5. Apply Improvements to Target (I/O heavy)
+            commit_msg: Final[str] = f"Zen Improvement: Applied {len(improvements)} generated changes."
             
             applied_details = self.git_manager.apply_improvements(
                 local_repo_path=target_path,
@@ -170,47 +177,36 @@ class Zen:
                 commit_message=commit_msg
             )
             
-            # 5. Create Summary
-            summary = {
-                'repositories_analyzed': total_repos,
-                'files_targeted': len(self.files_to_update) or 'All',
+            # 6. Final Summary Update
+            result.update({
                 'improvements_generated': len(improvements),
                 'improvements_applied': len(applied_details),
                 'new_branch': self.branch_name,
-                'target_path': target_path,
                 'success': True
-            }
+            })
             
-            logger.info(f"Zen cycle successfully completed. Applied {summary['improvements_applied']} changes.")
-            return summary
+            logger.info(f"Zen cycle successfully completed. Applied {result['improvements_applied']} changes.")
+            return result
             
         except ZenConfigError as e:
             logger.critical(f"Configuration Error: {e}")
-            return {**failure_result, 'error': f"Configuration Error: {str(e)}"}
+            result['error'] = f"Configuration Error: {str(e)}"
+            return result
             
         except Exception as e:
             # Log the full traceback for operational errors
             logger.exception("Zen cycle failed due to an unexpected operational error.")
-            
-            # Use the dynamically calculated number of analyzed repos if available
-            analyzed_count = len(repo_urls_to_clone) if repo_urls_to_clone else 0
-
-            return {
-                **failure_result, 
-                'error': f"Operational failure: {type(e).__name__}: {str(e)}",
-                'repositories_analyzed': analyzed_count
-            }
+            result['error'] = f"Operational failure: {type(e).__name__}: {str(e)}"
+            return result
             
         finally:
-            # 6. Cleanup: Ensure temporary directories are removed
+            # 7. Cleanup: Ensure temporary directories are removed
             self._cleanup(all_local_paths)
 
 
 def main():
     """Command-line interface for Zen."""
     import argparse
-    
-    # Logging is set up outside main, but we ensure it's configured.
     
     parser = argparse.ArgumentParser(
         description='Zen: Self-improving code system. Orchestrates knowledge synthesis and code evolution.',
@@ -266,18 +262,21 @@ def main():
         
         result = zen.run()
         
+        # Use target_path from the result dictionary for robust output
+        target_path_output = result.get('target_path')
+        
         if result['success']:
             print("-" * 40)
             print(f"✅ Zen completed successfully!")
             print(f"   Analyzed repositories: {result['repositories_analyzed']}")
             print(f"   Improvements applied: {result['improvements_applied']}")
-            if target_path := result.get('target_path'):
-                 print(f"   Local changes saved at: {target_path}")
+            if target_path_output:
+                 print(f"   Local changes saved at: {target_path_output}")
             if result.get('new_branch'):
                  print(f"   Created branch: {result['new_branch']}")
             print("-" * 40)
         else:
-            # Direct error output to stderr for better standard CLI behavior
+            # Direct error output to stderr
             print("-" * 40, file=sys.stderr)
             print(f"❌ Zen failed: {result.get('error', 'Unknown error')}", file=sys.stderr)
             print("-" * 40, file=sys.stderr)
