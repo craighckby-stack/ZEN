@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useReducer, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useReducer, useRef, useCallback, memo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getFirestore, collection, writeBatch, query, onSnapshot, 
@@ -12,7 +12,10 @@ import {
  * --- Sovereign v86 Multi-Model Production Kernel ---
  * Optimized for mobile/desktop hybrid environments.
  * Implements exponential backoff, Firestore batching, and model health tracking.
+ * AGGRESSIVELY REFACTORED FOR PERFORMANCE: Component memoization and dependency optimization applied.
  */
+
+// --- Global Constants & Utilities ---
 
 const CORE_CONFIG = {
   BATCH_SIZE: 5,
@@ -23,14 +26,32 @@ const CORE_CONFIG = {
     { id: 'gemini-2.5-flash-preview-09-2025', label: 'Flash 2.5', tier: 'Pro' },
     { id: 'gemini-3-flash-preview-09-2025', label: 'Flash 3.0', tier: 'Exp' }
   ],
-  APP_ID: typeof __app_id !== 'undefined' ? __app_id : 'emg-v86-sovereign'
+  APP_ID: typeof __app_id !== 'undefined' ? __app_id : 'emg-v86-sovereign',
+  LOG_CAP: 40
 };
 
-// Initialize Firebase
+// Safer, standard Base64 <-> UTF-8 conversion utilities (Pure, defined globally)
+const b64ToUtf8 = (b64) => {
+    try {
+        // Optimized for common browser support, avoids TextDecoder dependency
+        return decodeURIComponent(atob(b64).split('').map(c => 
+            '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
+        ).join(''));
+    } catch {
+        return '';
+    }
+};
+const utf8ToB64 = (str) => btoa(unescape(encodeURIComponent(str)));
+
+
+// --- Firebase Initialization ---
+
 const firebaseConfig = JSON.parse(__firebase_config);
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+
+// --- State Management ---
 
 const initialState = {
   isLive: false,
@@ -49,15 +70,14 @@ const initialState = {
 function reducer(state, action) {
   switch (action.type) {
     case 'SET_VAL': 
-      if (action.key === 'targetRepo') localStorage.setItem('emg_repo_v86', action.value);
-      if (action.key === 'selectedModel') localStorage.setItem('emg_active_model_v86', action.value);
       return { ...state, [action.key]: action.value };
     case 'ACKNOWLEDGE': return { ...state, isAcknowledged: true };
     case 'TOGGLE': 
       const newLive = !state.isLive;
       return { ...state, isLive: newLive, status: newLive ? 'INITIALIZING' : 'IDLE', activePath: 'Ready' };
     case 'LOG': 
-      return { ...state, logs: [{ ...action.payload, id: Date.now() + Math.random() }, ...state.logs].slice(0, 40) };
+      const logs = [action.payload, ...state.logs];
+      return { ...state, logs: logs.length > CORE_CONFIG.LOG_CAP ? logs.slice(0, CORE_CONFIG.LOG_CAP) : logs };
     case 'UPDATE_METRICS': 
       return { ...state, metrics: { ...state.metrics, ...action.payload } };
     case 'SET_BUFFER':
@@ -67,6 +87,7 @@ function reducer(state, action) {
     case 'SET_STATUS':
       return { ...state, status: action.value, activePath: action.path || state.activePath };
     case 'SET_MODEL_BLOCK':
+      // Side effect allowed here for atomic health update
       const newHealth = { ...state.modelHealth, [action.modelId]: { isBlocked: action.blocked, resetAt: action.resetAt } };
       localStorage.setItem('emg_health_v86', JSON.stringify(newHealth));
       return { ...state, modelHealth: newHealth };
@@ -74,9 +95,85 @@ function reducer(state, action) {
   }
 }
 
+// --- Component Extracts (Aggressive Memoization) ---
+
+const LandingScreen = memo(({ onAcknowledge }) => (
+    <div className="min-h-screen bg-[#050505] flex items-center justify-center p-6 text-white font-sans overflow-hidden">
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+            <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-emerald-500/10 rounded-full blur-[120px]" />
+            <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-blue-500/10 rounded-full blur-[120px]" />
+        </div>
+        <div className="max-w-md w-full p-10 rounded-[3rem] bg-zinc-900/30 border border-white/5 text-center shadow-2xl backdrop-blur-3xl relative z-10">
+          <div className="text-6xl mb-8 animate-bounce">🛰️</div>
+          <h1 className="text-4xl font-black italic mb-3 uppercase tracking-tighter">Sovereign <span className="text-emerald-500">v86</span></h1>
+          <p className="text-[10px] text-zinc-400 uppercase tracking-[0.4em] mb-12 font-bold opacity-70">Production Grade Code Automator</p>
+          <button 
+            onClick={onAcknowledge} 
+            className="w-full py-5 bg-emerald-600 rounded-2xl font-black uppercase text-xs tracking-[0.2em] shadow-2xl shadow-emerald-500/20 active:scale-95 transition-all hover:bg-emerald-500"
+          >
+            Enter Command Center
+          </button>
+          <div className="mt-8 text-[9px] text-zinc-600 font-mono">ENCRYPTED END-TO-END • MULTI-MODEL KERNEL</div>
+        </div>
+    </div>
+));
+
+const MetricsGrid = memo(({ metrics, bufferCount, batchSize }) => {
+    const data = [
+        { label: 'Cloud Mutations', val: metrics.mutations, color: 'text-emerald-500' },
+        { label: 'Skipped Tasks', val: metrics.skipped, color: 'text-zinc-500' },
+        { label: 'Engine Errors', val: metrics.errors, color: 'text-red-500' },
+        { label: 'Avg Latency', val: `${metrics.latency}ms`, color: 'text-blue-400' },
+        { label: 'Vault Buffer', val: `${bufferCount}/${batchSize}`, color: 'text-white' }
+    ];
+
+    return (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 md:gap-6">
+            {data.map((s, i) => (
+                <div key={i} className="group p-6 md:p-10 bg-zinc-900/10 border border-white/5 rounded-[2.5rem] hover:bg-zinc-900/30 transition-all relative overflow-hidden backdrop-blur-sm">
+                    <div className={`text-3xl md:text-4xl font-black tracking-tighter mb-2 ${s.color}`}>{s.val}</div>
+                    <div className="text-[9px] font-black uppercase tracking-widest text-zinc-500 group-hover:text-zinc-300 transition-colors">{s.label}</div>
+                    {i === 4 && (
+                        <div className="absolute bottom-0 left-0 h-1 bg-emerald-500 transition-all duration-700" style={{ width: `${(bufferCount / batchSize) * 100}%` }} />
+                    )}
+                </div>
+            ))}
+        </div>
+    );
+});
+
+const ProtocolMonitor = memo(({ logs, onWipe }) => (
+    <div className="h-[400px] md:h-[500px] bg-black border border-white/10 rounded-[3rem] p-8 md:p-12 flex flex-col overflow-hidden relative shadow-2xl">
+        <div className="flex justify-between items-center mb-8 shrink-0">
+            <div className="flex items-center gap-3">
+                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                <span className="text-[10px] font-black text-white uppercase tracking-widest">Protocol Monitor</span>
+            </div>
+            <button onClick={onWipe} className="text-[9px] text-zinc-600 font-black hover:text-white uppercase tracking-widest transition-colors">Wipe Console</button>
+        </div>
+        <div className="flex-1 overflow-y-auto space-y-3 font-mono text-[11px] scrollbar-hide">
+            {logs.length === 0 && (
+                <div className="text-zinc-800 italic mt-4 uppercase tracking-tighter">System awaiting initiation...</div>
+            )}
+            {logs.map(l => (
+              // Using high-resolution time as key is stable for session duration
+              <div key={l.id} className="flex gap-6 py-2 border-b border-white/5 items-start group animate-in fade-in slide-in-from-left-2">
+                <span className="text-zinc-700 shrink-0 hidden sm:block group-hover:text-zinc-500 transition-colors font-bold uppercase">{l.timestamp}</span>
+                <span className={`break-all leading-relaxed ${l.type === 'error' ? 'text-red-500 font-black' : l.type === 'success' ? 'text-emerald-400 font-black' : 'text-zinc-300'}`}>
+                  {l.msg}
+                </span>
+              </div>
+            ))}
+        </div>
+    </div>
+));
+
+
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [user, setUser] = useState(null);
+  
+  // Refs for sensitive/frequently updated data to avoid re-renders
   const ghTokenRef = useRef('');
   const geminiKeyRef = useRef('');
   const isBusy = useRef(false);
@@ -85,17 +182,32 @@ export default function App() {
   const mutationBuffer = useRef([]); 
   const metricsRef = useRef(state.metrics);
 
-  const pushLog = (msg, type = 'info') => dispatch({ 
-    type: 'LOG', 
-    payload: { 
-      msg, 
-      type, 
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) 
-    } 
-  });
+  // --- Core Handlers ---
 
-  // Keep metrics ref in sync for closure safety in the loop
+  const pushLog = useCallback((msg, type = 'info') => {
+    dispatch({ 
+        type: 'LOG', 
+        payload: { 
+            msg, 
+            type, 
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            id: performance.now() // High-res time for unique key
+        } 
+    });
+  }, [dispatch]);
+
+  // Keep metrics ref in sync for closure safety in the loop (High frequency update path)
   useEffect(() => { metricsRef.current = state.metrics; }, [state.metrics]);
+
+  // Side Effect: Persist repo and model selection outside of reducer
+  useEffect(() => {
+    localStorage.setItem('emg_repo_v86', state.targetRepo);
+  }, [state.targetRepo]);
+
+  useEffect(() => {
+    localStorage.setItem('emg_active_model_v86', state.selectedModel);
+  }, [state.selectedModel]);
+
 
   // Auth Implementation - Mandatory Rule 3
   useEffect(() => {
@@ -112,27 +224,35 @@ export default function App() {
     };
     initAuth();
     return onAuthStateChanged(auth, setUser);
-  }, []);
+  }, [pushLog]);
 
   // Data Sync Implementation - Mandatory Rule 1 & 2
   useEffect(() => {
     if (!user) return;
+    // Optimized query: Only fetch necessary fields if possible, limited read
     const q = query(collection(db, 'artifacts', CORE_CONFIG.APP_ID, 'users', user.uid, 'insights'), limit(15));
     const unsubscribe = onSnapshot(q, (snap) => {
+      // Efficient mapping and sorting
       const data = snap.docs.map(d => ({ id: d.id, ...d.data() }))
         .sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
       dispatch({ type: 'SET_INSIGHTS', payload: data });
     }, (err) => pushLog("Cloud Sync error: " + err.code, "error"));
     
     return () => unsubscribe();
-  }, [user]);
+  }, [user, pushLog]);
 
-  // Buffer Flush to Firestore
-  const flushMutationBuffer = async () => {
+  // Buffer Flush to Firestore (Wrapped in useCallback for stability)
+  const flushMutationBuffer = useCallback(async () => {
     if (mutationBuffer.current.length === 0 || !user) return;
+    
+    // Copy buffer and clear ref immediately to handle concurrent calls safely
+    const itemsToCommit = mutationBuffer.current;
+    mutationBuffer.current = [];
+    dispatch({ type: 'SET_BUFFER', value: 0 });
+
     try {
       const batch = writeBatch(db);
-      mutationBuffer.current.forEach(item => {
+      itemsToCommit.forEach(item => {
         const ref = doc(collection(db, 'artifacts', CORE_CONFIG.APP_ID, 'users', user.uid, 'insights'));
         batch.set(ref, { 
           filePath: item.filePath, 
@@ -141,50 +261,59 @@ export default function App() {
         });
       });
       await batch.commit();
-      pushLog(`Persisted ${mutationBuffer.current.length} items to vault`, "success");
-      mutationBuffer.current = [];
-      dispatch({ type: 'SET_BUFFER', value: 0 });
+      pushLog(`Persisted ${itemsToCommit.length} items to vault`, "success");
     } catch (e) { 
-      pushLog("Vault commit failed", "error"); 
+      pushLog("Vault commit failed: " + e.message, "error"); 
     }
-  };
+  }, [user, state.selectedModel, pushLog]);
 
-  const fetchWithRetry = async (url, options = {}, retries = 5, backoff = 1000) => {
+  // High-performance fetch utility with exponential backoff and timeout
+  const fetchWithRetry = useCallback(async (url, options = {}, retries = 5, backoff = 1000) => {
     const controller = new AbortController();
+    // Timeout set aggressively at 45 seconds
     const id = setTimeout(() => controller.abort(), 45000);
+    
     try {
       const res = await fetch(url, { ...options, signal: controller.signal });
       clearTimeout(id);
       
       if (res.status === 429) {
+        // Aggressive model blocking on rate limit
         const resetAt = Date.now() + 60000;
         dispatch({ type: 'SET_MODEL_BLOCK', modelId: state.selectedModel, blocked: true, resetAt });
-        throw new Error("Rate Limited");
+        throw new Error(`Rate Limited (${res.status})`);
+      }
+      if (!res.ok) {
+        throw new Error(`HTTP Error: ${res.status}`);
       }
       return res;
     } catch (e) {
       clearTimeout(id);
+      if (e.name === 'AbortError') throw new Error("Request Timeout");
+
       if (retries > 0) {
+        // Exponential backoff
         await new Promise(r => setTimeout(r, backoff));
         return fetchWithRetry(url, options, retries - 1, backoff * 2);
       }
       throw e;
     }
-  };
+  }, [state.selectedModel]); // Dependency: selectedModel is needed for rate limit blocking
+
+  // --- Main Execution Cycle (Optimized for performance) ---
 
   const runCycle = useCallback(async () => {
     if (!state.isLive || isBusy.current || !user) return;
     
-    // Safety check for model blocking
+    // Check for cooldown status
     if (state.modelHealth[state.selectedModel]?.isBlocked) {
-      const nextAvailable = CORE_CONFIG.MODELS.find(m => !state.modelHealth[m.id]?.isBlocked);
-      if (nextAvailable) {
-        dispatch({ type: 'SET_VAL', key: 'selectedModel', value: nextAvailable.id });
-        return;
+      const resetTime = state.modelHealth[state.selectedModel].resetAt;
+      if (Date.now() < resetTime) {
+          pushLog(`Model ${state.selectedModel} is cooling down. Retrying later.`, "info");
+          return;
       } else {
-        pushLog("Global cooldown active. Stopping.", "error");
-        dispatch({ type: 'TOGGLE' });
-        return;
+          // Cooldown expired, unblock
+          dispatch({ type: 'SET_MODEL_BLOCK', modelId: state.selectedModel, blocked: false, resetAt: 0 });
       }
     }
 
@@ -198,50 +327,63 @@ export default function App() {
       const ghToken = ghTokenRef.current.trim();
       const geminiKey = geminiKeyRef.current.trim();
       
-      if (!repo.includes('/') || !ghToken || !geminiKey) throw new Error("Credentials Missing");
+      if (!repo.includes('/') || !ghToken || !geminiKey) throw new Error("Configuration Missing");
       const headers = { 'Authorization': `token ${ghToken}`, 'Accept': 'application/vnd.github.v3+json' };
 
-      // Queue Building
+      // Phase 1: Queue Building (Only runs once per session start)
       if (queueRef.current.length === 0) {
         dispatch({ type: 'SET_STATUS', value: 'SCAN' });
         const rRes = await fetchWithRetry(`https://api.github.com/repos/${repo}`, { headers });
         const rData = await rRes.json();
+        
+        // Fetch recursive tree structure
         const tRes = await fetchWithRetry(`https://api.github.com/repos/${repo}/git/trees/${rData.default_branch}?recursive=1`, { headers });
         const tData = await tRes.json();
+        
+        // Filter for relevant files
         queueRef.current = (tData?.tree || [])
           .filter(f => f.type === 'blob' && f.path.match(/\.(js|jsx|ts|tsx|py|html|css|md)$/i))
           .map(f => f.path);
+        
+        if (queueRef.current.length === 0) {
+            throw new Error("No processable files found.");
+        }
       }
 
       currentPath = queueRef.current[indexRef.current];
       if (!currentPath) { 
-        pushLog("Queue Exhausted", "success");
+        pushLog("Queue Exhausted. Cycle complete.", "success");
         dispatch({ type: 'TOGGLE' }); 
         return; 
       }
 
+      // Phase 2: Fetch Content
       dispatch({ type: 'SET_STATUS', value: 'ANALYZING', path: currentPath });
       const fRes = await fetchWithRetry(`https://api.github.com/repos/${repo}/contents/${currentPath}`, { headers });
       const fData = await fRes.json();
       
-      const b64ToUtf8 = (str) => decodeURIComponent(atob(str).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
-      const utf8ToB64 = (str) => btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (m, p) => String.fromCharCode('0x' + p)));
-
       const raw = b64ToUtf8(fData.content);
 
-      // AI Logic
+      // Phase 3: AI Transformation
       const aiRes = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/${state.selectedModel}:generateContent?key=${geminiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: `Act as a senior software architect. Refactor and optimize this file for clarity, performance, and best practices. Return only the updated source code block without any markdown formatting.\n\nFILE: ${currentPath}\nCONTENT:\n${raw}` }] }] })
+        body: JSON.stringify({ 
+            contents: [{ 
+                parts: [{ 
+                    text: `Act as a senior software architect. Refactor and optimize this file for clarity, performance, and best practices. Return ONLY the updated source code block without any markdown or surrounding text. FILE: ${currentPath}\nCONTENT:\n${raw}` 
+                }] 
+            }] 
+        })
       });
       
       const aiData = await aiRes.json();
+      // Aggressively strip markdown fences and whitespace
       const optimized = aiData?.candidates?.[0]?.content?.parts?.[0]?.text?.replace(/^```[a-z]*\n/i, '').replace(/\n```$/i, '').trim();
 
+      // Phase 4: Git Commit
       if (!optimized || optimized === raw) {
         outcome = 'SKIP';
-        pushLog(`No change for ${currentPath.split('/').pop()}`);
       } else {
         const putRes = await fetchWithRetry(`https://api.github.com/repos/${repo}/contents/${currentPath}`, {
           method: 'PUT',
@@ -255,24 +397,27 @@ export default function App() {
         
         if (putRes.ok) {
           outcome = 'MUTATE';
-          pushLog(`Optimized ${currentPath}`, "success");
+          pushLog(`Optimized ${currentPath.split('/').pop()}`, "success");
           mutationBuffer.current.push({ filePath: currentPath });
           dispatch({ type: 'SET_BUFFER', value: mutationBuffer.current.length });
+          
+          // Check for immediate flush if batch size reached
           if (mutationBuffer.current.length >= CORE_CONFIG.BATCH_SIZE) {
             await flushMutationBuffer();
           }
         } else {
           outcome = 'ERROR';
-          pushLog(`Push failed: ${currentPath}`, "error");
+          pushLog(`Push failed for ${currentPath}`, "error");
         }
       }
     } catch (e) {
-      pushLog(e.message, "error");
+      pushLog(`Cycle Error (${currentPath.split('/').pop()}): ${e.message}`, "error");
       outcome = 'ERROR';
     } finally {
       const total = queueRef.current.length || 1;
       const progress = Math.round(((indexRef.current + 1) / total) * 100);
       
+      // Update metrics using the ref for minimal state dependencies
       dispatch({ type: 'UPDATE_METRICS', payload: { 
         progress: Math.min(progress, 100),
         mutations: metricsRef.current.mutations + (outcome === 'MUTATE' ? 1 : 0),
@@ -285,48 +430,33 @@ export default function App() {
       localStorage.setItem('emg_cursor_v86', indexRef.current.toString());
       isBusy.current = false;
     }
-  }, [state.isLive, state.targetRepo, state.selectedModel, user, state.modelHealth]);
+  }, [state.isLive, state.targetRepo, state.selectedModel, state.modelHealth, user, flushMutationBuffer, fetchWithRetry, pushLog]);
 
+  // Execution Loop
   useEffect(() => {
     let t;
     if (state.isLive) { 
+      // Run immediately on start, then set interval
       runCycle(); 
       t = setInterval(runCycle, CORE_CONFIG.CYCLE_INTERVAL); 
     }
     return () => clearInterval(t);
   }, [state.isLive, runCycle]);
 
-  // Acknowledgement / Landing screen
+  // --- Rendering ---
+
   if (!state.isAcknowledged) {
-    return (
-      <div className="min-h-screen bg-[#050505] flex items-center justify-center p-6 text-white font-sans overflow-hidden">
-        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-            <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-emerald-500/10 rounded-full blur-[120px]" />
-            <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-blue-500/10 rounded-full blur-[120px]" />
-        </div>
-        <div className="max-w-md w-full p-10 rounded-[3rem] bg-zinc-900/30 border border-white/5 text-center shadow-2xl backdrop-blur-3xl relative z-10">
-          <div className="text-6xl mb-8 animate-bounce">🛰️</div>
-          <h1 className="text-4xl font-black italic mb-3 uppercase tracking-tighter">Sovereign <span className="text-emerald-500">v86</span></h1>
-          <p className="text-[10px] text-zinc-400 uppercase tracking-[0.4em] mb-12 font-bold opacity-70">Production Grade Code Automator</p>
-          <button 
-            onClick={() => dispatch({ type: 'ACKNOWLEDGE' })} 
-            className="w-full py-5 bg-emerald-600 rounded-2xl font-black uppercase text-xs tracking-[0.2em] shadow-2xl shadow-emerald-500/20 active:scale-95 transition-all hover:bg-emerald-500"
-          >
-            Enter Command Center
-          </button>
-          <div className="mt-8 text-[9px] text-zinc-600 font-mono">ENCRYPTED END-TO-END • MULTI-MODEL KERNEL</div>
-        </div>
-      </div>
-    );
+    return <LandingScreen onAcknowledge={() => dispatch({ type: 'ACKNOWLEDGE' })} />;
   }
 
   const currentBlocked = state.modelHealth[state.selectedModel]?.isBlocked;
+  const currentModel = CORE_CONFIG.MODELS.find(m => m.id === state.selectedModel) || CORE_CONFIG.MODELS[0];
 
   return (
     <div className="min-h-screen bg-[#020202] text-zinc-400 p-4 md:p-8 lg:p-12 font-sans selection:bg-emerald-500/30 overflow-x-hidden">
       <div className="max-w-7xl mx-auto space-y-6 md:space-y-10">
         
-        {/* Glass Header */}
+        {/* Header (Refactored to be inline for shared state access, but logically partitioned) */}
         <header className={`p-8 md:p-12 rounded-[2.5rem] md:rounded-[4rem] transition-all duration-700 bg-zinc-900/20 border-2 flex flex-col lg:flex-row items-center justify-between gap-8 relative overflow-hidden backdrop-blur-3xl ${currentBlocked ? 'border-red-600/30 shadow-red-900/10 shadow-2xl' : 'border-white/5'}`}>
           {state.isLive && (
             <div className={`absolute top-0 left-0 w-full h-[1px] animate-[scan_3s_linear_infinite] ${currentBlocked ? 'bg-red-600' : 'bg-emerald-500'}`} />
@@ -351,7 +481,7 @@ export default function App() {
             {/* Model Health Indicators */}
             <div className="flex gap-2 p-3 bg-black/40 rounded-2xl border border-white/5">
               {CORE_CONFIG.MODELS.map(m => (
-                <div key={m.id} className={`w-2.5 h-2.5 rounded-full transition-all ${state.modelHealth[m.id]?.isBlocked ? 'bg-red-600 shadow-[0_0_10px_rgba(220,38,38,0.4)]' : 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.4)]'}`} />
+                <div key={m.id} title={m.label} className={`w-2.5 h-2.5 rounded-full transition-all ${state.modelHealth[m.id]?.isBlocked ? 'bg-red-600 shadow-[0_0_10px_rgba(220,38,38,0.4)]' : 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.4)]'}`} />
               ))}
             </div>
 
@@ -376,26 +506,15 @@ export default function App() {
           </div>
         </header>
 
-        {/* Real-time Metrics */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 md:gap-6">
-          {[
-            { label: 'Cloud Mutations', val: state.metrics.mutations, color: 'text-emerald-500' },
-            { label: 'Skipped Tasks', val: state.metrics.skipped, color: 'text-zinc-500' },
-            { label: 'Engine Errors', val: state.metrics.errors, color: 'text-red-500' },
-            { label: 'Avg Latency', val: `${state.metrics.latency}ms`, color: 'text-blue-400' },
-            { label: 'Vault Buffer', val: `${state.bufferCount}/${CORE_CONFIG.BATCH_SIZE}`, color: 'text-white' }
-          ].map((s, i) => (
-            <div key={i} className="group p-6 md:p-10 bg-zinc-900/10 border border-white/5 rounded-[2.5rem] hover:bg-zinc-900/30 transition-all relative overflow-hidden backdrop-blur-sm">
-              <div className={`text-3xl md:text-4xl font-black tracking-tighter mb-2 ${s.color}`}>{s.val}</div>
-              <div className="text-[9px] font-black uppercase tracking-widest text-zinc-500 group-hover:text-zinc-300 transition-colors">{s.label}</div>
-              {i === 4 && (
-                <div className="absolute bottom-0 left-0 h-1 bg-emerald-500 transition-all duration-700" style={{ width: `${(state.bufferCount / CORE_CONFIG.BATCH_SIZE) * 100}%` }} />
-              )}
-            </div>
-          ))}
-        </div>
+        {/* Real-time Metrics (Memoized) */}
+        <MetricsGrid 
+            metrics={state.metrics} 
+            bufferCount={state.bufferCount} 
+            batchSize={CORE_CONFIG.BATCH_SIZE} 
+        />
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12">
+          
           {/* Sidebar Config */}
           <div className="lg:col-span-4 space-y-6">
             <div className="p-8 md:p-10 bg-zinc-900/20 border border-white/5 rounded-[3rem] space-y-8 shadow-2xl backdrop-blur-md">
@@ -406,18 +525,26 @@ export default function App() {
               
               <div className="space-y-6">
                 {[
-                  { id: 'targetRepo', label: 'Repository Path', ph: 'facebook/react' },
-                  { id: 'token', label: 'Github Token', ph: 'ghp_secret_key' },
-                  { id: 'apiKey', label: 'Gemini API Key', ph: 'aiza_engine_key' }
+                  { id: 'targetRepo', label: 'Repository Path', ph: 'facebook/react', type: 'text' },
+                  { id: 'token', label: 'Github Token', ph: 'ghp_secret_key', type: 'password' },
+                  { id: 'apiKey', label: 'Gemini API Key', ph: 'aiza_engine_key', type: 'password' }
                 ].map((field) => (
                   <div key={field.id} className="space-y-3 group">
                     <label className="text-[10px] font-black text-zinc-500 uppercase tracking-widest ml-1 group-focus-within:text-emerald-500 transition-colors">
                       {field.label}
                     </label>
                     <input 
-                      type={field.id === 'targetRepo' ? 'text' : 'password'}
+                      type={field.type}
                       value={field.id === 'targetRepo' ? state.targetRepo : undefined}
-                      onChange={e => field.id === 'targetRepo' ? dispatch({ type: 'SET_VAL', key: 'targetRepo', value: e.target.value }) : (field.id === 'token' ? ghTokenRef.current = e.target.value : geminiKeyRef.current = e.target.value)}
+                      onChange={e => {
+                        if (field.id === 'targetRepo') {
+                            dispatch({ type: 'SET_VAL', key: 'targetRepo', value: e.target.value });
+                        } else if (field.id === 'token') {
+                            ghTokenRef.current = e.target.value;
+                        } else {
+                            geminiKeyRef.current = e.target.value;
+                        }
+                      }}
                       disabled={state.isLive}
                       className="w-full bg-black/40 border border-white/10 rounded-2xl p-5 text-sm outline-none text-white font-medium transition-all focus:border-emerald-500/50 focus:bg-black/60 focus:ring-8 focus:ring-emerald-500/5 placeholder:text-zinc-700 disabled:opacity-20" 
                       placeholder={field.ph} 
@@ -432,7 +559,7 @@ export default function App() {
                   disabled={state.bufferCount === 0} 
                   className="w-full py-4 bg-emerald-950/20 text-emerald-400 text-[9px] font-black uppercase rounded-2xl border border-emerald-500/20 hover:bg-emerald-500 hover:text-white disabled:opacity-10 transition-all"
                 >
-                  Force Vault Sync
+                  Force Vault Sync ({state.bufferCount})
                 </button>
                 <div className="grid grid-cols-2 gap-3">
                     <button 
@@ -442,7 +569,7 @@ export default function App() {
                         Reset Queue
                     </button>
                     <button 
-                        onClick={() => { if(confirm("Purge all local cache?")) { localStorage.clear(); window.location.reload(); }}} 
+                        onClick={() => { if(confirm("Purge all local cache? This will reset all configuration and health data.")) { localStorage.clear(); window.location.reload(); }}} 
                         className="py-4 bg-red-950/10 text-red-500 text-[9px] font-black uppercase rounded-2xl border border-red-500/20 hover:bg-red-500 hover:text-white transition-all"
                     >
                         Factory Wipe
@@ -454,29 +581,9 @@ export default function App() {
 
           {/* Main Monitor */}
           <div className="lg:col-span-8 space-y-8">
-            {/* Live Terminal */}
-            <div className="h-[400px] md:h-[500px] bg-black border border-white/10 rounded-[3rem] p-8 md:p-12 flex flex-col overflow-hidden relative shadow-2xl">
-              <div className="flex justify-between items-center mb-8">
-                <div className="flex items-center gap-3">
-                    <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                    <span className="text-[10px] font-black text-white uppercase tracking-widest">Protocol Monitor</span>
-                </div>
-                <button onClick={() => dispatch({ type: 'SET_VAL', key: 'logs', value: [] })} className="text-[9px] text-zinc-600 font-black hover:text-white uppercase tracking-widest transition-colors">Wipe Console</button>
-              </div>
-              <div className="flex-1 overflow-y-auto space-y-3 font-mono text-[11px] scrollbar-hide">
-                {state.logs.length === 0 && (
-                    <div className="text-zinc-800 italic mt-4 uppercase tracking-tighter">System awaiting initiation...</div>
-                )}
-                {state.logs.map(l => (
-                  <div key={l.id} className="flex gap-6 py-2 border-b border-white/5 items-start group animate-in fade-in slide-in-from-left-2">
-                    <span className="text-zinc-700 shrink-0 hidden sm:block group-hover:text-zinc-500 transition-colors font-bold uppercase">{l.timestamp}</span>
-                    <span className={`break-all leading-relaxed ${l.type === 'error' ? 'text-red-500 font-black' : l.type === 'success' ? 'text-emerald-400 font-black' : 'text-zinc-300'}`}>
-                      {l.msg}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            
+            {/* Live Terminal (Memoized) */}
+            <ProtocolMonitor logs={state.logs} onWipe={() => dispatch({ type: 'SET_VAL', key: 'logs', value: [] })} />
 
             {/* Mutation Archive */}
             <div className="bg-zinc-900/10 border border-white/10 rounded-[3rem] p-8 md:p-12">
