@@ -1,16 +1,15 @@
 # Zen: Autonomous Code Evolution Engine
 
-**Zen** is an autonomous code system engineered for continuous, high-impact performance enhancement. It leverages deep, cross-repository insights and advanced AI to aggressively optimize target codebases.
+**Zen** is an autonomous code system engineered for continuous, high-impact performance enhancement. It leverages deep, cross-repository insights and advanced AI to proactively optimize target codebases.
 
 ## Core Capabilities
 
-- **Cross-Repository RAG:** Multi-repo analysis for deep contextual understanding.
-- **Gemini AI Optimization:** Automated, high-velocity code improvement suggestions.
-- **GitOps Integration:** Zero-friction delivery via integrated branching and pull requests.
-- **Precision Scope:** Configurable targeting of specific files and modules.
-- **Controlled Evolution:** Safety mechanisms ensure predictable and auditable changes.
+- **Cross-Repository RAG:** Multi-repository analysis utilizing Retrieval-Augmented Generation (RAG) for deep contextual understanding across complex environments.
+- **Gemini AI Optimization:** Automated, high-velocity generation of code improvement suggestions powered by Google's Gemini models.
+- **GitOps Integration:** Zero-friction delivery via integrated branching and automated pull requests (PRs).
+- **Precision Scope:** Configurable targeting, allowing optimization efforts to focus on specific files, modules, or directories.
+- **Controlled Evolution:** Built-in safety mechanisms ensure predictable, auditable, and traceable changes throughout the evolution process.
 
 ## Get Started
 
-```bash
 pip install -r requirements.txt
